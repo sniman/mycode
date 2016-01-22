@@ -1,0 +1,1643 @@
+create or replace
+PACKAGE BODY          BFG_DIST_CUST_SYNC_PKG_DEV
+AS
+   PROCEDURE SP_BFG_DIST_CUST_MAP (p_retcode OUT NUMBER)
+   AS
+      --   Declaration section
+      lv_count                    NUMBER := 0;
+      mapped_account_child        NUMBER;
+      account_parent              NUMBER;
+      mapping_exists              NUMBER;
+      customer_exists             NUMBER;
+      distributor_exists          NUMBER;
+      gsp_distributor_id          NUMBER;
+      bfg_customer_present        NUMBER;
+      class_account_fetch         NUMBER;
+      class_account_id            NUMBER;
+      account_class_val           NUMBER;
+      customer_mapping            NUMBER;
+      partner_company_id          NUMBER;
+      ins_comp_accnt_id           NUMBER;
+      class_cust_partner_map      NUMBER;
+      class_cust_new_comp_map     NUMBER;
+      class_acc_found             NUMBER;
+      comp_cust_found             NUMBER;
+      classic_partner_mapping     NUMBER;
+      classic_newlycomp_mapping   NUMBER;
+      bfg_partner_mapping         NUMBER;
+      bfg_newcomp_mapping         NUMBER;
+      bfg_cust_partner_map        NUMBER;
+      bfg_cust_new_comp_map       NUMBER;
+      vpn_map_count               NUMBER;
+      sso_application_id          NUMBER;
+      user_comp_count             NUMBER;
+      user_app_count              NUMBER;
+      sso_user_map                NUMBER;
+      partner_company_count       NUMBER;
+      dist_count                  NUMBER;
+      test_cust                   NUMBER;
+      distributor_mapping         NUMBER;
+      map_count                   NUMBER;
+      classic_dist_map            NUMBER;
+      bfg_dist_map                NUMBER;
+      bfg_count                   NUMBER;
+      exist_acc_id                NUMBER;
+      bfg_existcomp_mapping       NUMBER;
+      classic_existcomp_mapping   NUMBER;
+      class_account_else_fetch    NUMBER;
+      account_class_else_val      NUMBER;
+      classic_dist_else_map       NUMBER;
+      bfg_dist_else_map           NUMBER;
+      sso_user_count              NUMBER;
+      count_user                  NUMBER;
+      ICA_MAP_COUNT               NUMBER;
+      ica_user_app_count          NUMBER;
+      NNI_EMAIL_COUNT             NUMBER;
+   BEGIN
+      DBMS_OUTPUT.enable (NULL);
+
+      --   Execution section
+      --design 4.2.2.a
+      --Checking if distributor and customer data present in (GSP_CUSTOMER_DISTRIBUTOR_V)GSP_CUSTOMER_DISTRIBUTOR_V, If yes then delete all row from TEMP_BFG_DIST_CUST_DETAILS
+      SELECT COUNT (1)
+        INTO lv_count
+        FROM bfg_owner.GSP_CUST_DISTRIBUTOR_INFO_V@dblnk_fce_bfg gcdv
+       WHERE gcdv.CHANNEL_TYPE = 'Indirect';
+
+      IF (lv_count > 0)
+      THEN
+         EXECUTE IMMEDIATE
+            'TRUNCATE TABLE GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS';
+
+         --design 4.2.2.b
+         --Loading TEMP_BFG_DIST_CUST_DETAILS table with GSP_CUSTOMER_DISTRIBUTOR_V data
+         DBMS_OUTPUT.put_line ('Inserting Into TEMP_BFG_DIST_CUST_DETAILS');
+
+         INSERT INTO GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS (
+                        BFG_DISTRIBUTOR_ID,
+                        BFG_DISTRIBUTOR_NAME,
+                        BFG_CUSTOMER_ID,
+                        CHANNEL_TYPE,
+                        ORG_TPCI_ID)
+            SELECT gcdv.DISTRIBUTOR_ID,
+                   gcdv.DISTRIBUTOR_NAME,
+                   gcdv.CUSTOMER_ID,
+                   gcdv.CHANNEL_TYPE,
+                   gcdv.ORG_TPCI_ID
+              FROM bfg_owner.GSP_CUST_DISTRIBUTOR_INFO_V@dblnk_fce_bfg gcdv
+             WHERE gcdv.CHANNEL_TYPE = 'Indirect';
+
+         COMMIT;
+         --design 4.2.2.c
+         --Loading BFG_DIST_ADDITIONAL_DETAILS table with TEMP_BFG_DIST_CUST_DETAILS data
+         DBMS_OUTPUT.put_line ('Inserting Into BFG_DIST_ADDITIONAL_DETAILS');
+
+         INSERT INTO GBC_CORE.BFG_DIST_ADDITIONAL_DETAILS (
+                        ACCOUNT_ID,
+                        BFG_DISTRIBUTOR_ID,
+                        BFG_DISTRIBUTOR_NAME,
+                        CHANNEL_TYPE,
+                        ORG_TPCI_ID,
+                        ACCOUNT_TYPE_ID)
+            SELECT a.account_id,
+                   tbdcd.BFG_DISTRIBUTOR_ID,
+                   tbdcd.BFG_DISTRIBUTOR_NAME,
+                   tbdcd.CHANNEL_TYPE,
+                   tbdcd.ORG_TPCI_ID,
+                   a.account_type_id
+              FROM TEMP_BFG_DIST_CUST_DETAILS tbdcd, Accounts a
+             WHERE     LOWER (tbdcd.BFG_DISTRIBUTOR_NAME) = LOWER (a.name)
+                   AND a.account_type_id = 10
+            MINUS
+            (SELECT bdad.account_id,
+                    bdad.BFG_DISTRIBUTOR_ID,
+                    bdad.BFG_DISTRIBUTOR_NAME,
+                    bdad.CHANNEL_TYPE,
+                    bdad.ORG_TPCI_ID,
+                    bdad.account_type_id
+               FROM BFG_DIST_ADDITIONAL_DETAILS bdad
+              WHERE     bdad.CHANNEL_TYPE = 'Indirect'
+                    AND bdad.ACCOUNT_TYPE_ID = 10
+             INTERSECT
+             SELECT a.account_id,
+                    tbdcd.BFG_DISTRIBUTOR_ID,
+                    tbdcd.BFG_DISTRIBUTOR_NAME,
+                    tbdcd.CHANNEL_TYPE,
+                    tbdcd.ORG_TPCI_ID,
+                    a.account_type_id
+               FROM TEMP_BFG_DIST_CUST_DETAILS tbdcd, Accounts a
+              WHERE     LOWER (tbdcd.BFG_DISTRIBUTOR_NAME) = LOWER (a.name)
+                    AND a.account_type_id = 10);
+
+         COMMIT;
+
+         --R27 Fetch corresponding Classic account ref data from BFG_FOREIGN_BUSINESS_KEYS_V  table
+
+         FOR TEMP_BFG_CLASS_MAP
+            IN (SELECT fbk.FBK_OBJECT1_ID AS BFG_CUS_ID
+                  FROM bfg_owner.BFG_FOREIGN_BUSINESS_KEYS_V@dblnk_fce_bfg fbk,
+                       bfg_owner.GSP_CUST_DISTRIBUTOR_INFO_V@dblnk_fce_bfg bfgfeed
+                 WHERE     bfgfeed.CUSTOMER_ID = fbk.FBK_OBJECT1_ID
+                       AND bfgfeed.CHANNEL_TYPE = 'Indirect'
+                       AND fbk.FBK_SOURCE_TABLE_NAME = 'BFG_CUSTOMERS'
+                       AND fbk.FBK_FOREIGN_SYSTEM = 'CLASSIC'
+                       AND fbk.FBK_CEASED_DATE IS NULL)
+         LOOP
+            DBMS_OUTPUT.put_line (
+                  'TEMP_BFG_CLASSIC_MAPPING BFG_CUS_ID-> '
+               || TEMP_BFG_CLASS_MAP.BFG_CUS_ID);
+
+            FOR A2
+               IN (SELECT fbk.FBK_FOREIGN_KEY AS CLASS_ACCOUNT_REF
+                     FROM bfg_owner.BFG_FOREIGN_BUSINESS_KEYS_V@dblnk_fce_bfg fbk,
+                          bfg_owner.GSP_CUST_DISTRIBUTOR_INFO_V@dblnk_fce_bfg bfgfeed
+                    WHERE     bfgfeed.CUSTOMER_ID = fbk.FBK_OBJECT1_ID
+                          AND bfgfeed.CHANNEL_TYPE = 'Indirect'
+                          AND fbk.FBK_SOURCE_TABLE_NAME = 'BFG_CUSTOMERS'
+                          AND fbk.FBK_FOREIGN_SYSTEM = 'CLASSIC'
+                          AND fbk.FBK_CEASED_DATE IS NULL
+                          AND fbk.FBK_OBJECT1_ID =
+                                 TEMP_BFG_CLASS_MAP.BFG_CUS_ID)
+            LOOP
+               --DBMS_OUTPUT.put_line ('TEMP_BFG_CLASSIC_MAPPING CLASS_ACCOUNT_REF-> '||CLASS_ACCOUNT_REF);
+               SELECT COUNT (*)
+                 INTO map_count
+                 FROM TEMP_BFG_CLASSIC_MAPPING
+                WHERE     BFG_CUS_ID = TEMP_BFG_CLASS_MAP.BFG_CUS_ID
+                      AND CLASS_ACCOUNT_REF = A2.CLASS_ACCOUNT_REF;
+
+               IF (map_count = 0)
+               THEN
+                  DBMS_OUTPUT.put_line (
+                     'Inserting Into TEMP_BFG_CLASSIC_MAPPING');
+
+                  INSERT INTO GBC_CORE.TEMP_BFG_CLASSIC_MAPPING (
+                                 BFG_CUS_ID,
+                                 CLASS_ACCOUNT_REF)
+                     SELECT TEMP_BFG_CLASS_MAP.BFG_CUS_ID,
+                            A2.CLASS_ACCOUNT_REF
+                       FROM DUAL
+                      WHERE NOT EXISTS
+                                   (SELECT *
+                                      FROM GBC_CORE.TEMP_BFG_CLASSIC_MAPPING
+                                     WHERE     BFG_CUS_ID =
+                                                  TEMP_BFG_CLASS_MAP.BFG_CUS_ID
+                                           AND CLASS_ACCOUNT_REF =
+                                                  A2.CLASS_ACCOUNT_REF);
+               END IF;
+
+               COMMIT;
+            END LOOP;
+         END LOOP;
+
+         COMMIT;
+
+         --R27 End
+
+         FOR BFG_DISTRIBUTOR
+            IN (SELECT DISTINCT BFG_DISTRIBUTOR_ID, BFG_DISTRIBUTOR_NAME
+                  FROM TEMP_BFG_DIST_CUST_DETAILS)
+         LOOP
+            DBMS_OUTPUT.put_line (
+                  'inside for loop:Distributor id > '
+               || BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID);
+            DBMS_OUTPUT.put_line (
+                  'inside for loop:name id > '
+               || BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_NAME);
+
+            SELECT COUNT (*)
+              INTO dist_count
+              FROM ACCOUNTS
+             WHERE     name = BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_NAME
+                   AND account_type_id = 10;
+
+            IF (dist_count > 0)
+            THEN
+               SELECT COUNT (*)
+                 INTO partner_company_count
+                 FROM GBC_CORE.accounts
+                WHERE     account_type_id = 20
+                      AND parent_id IN
+                             (SELECT account_id
+                                FROM GBC_CORE.accounts
+                               WHERE     LOWER (name) IN
+                                            (SELECT LOWER (
+                                                       BFG_DISTRIBUTOR_NAME)
+                                               FROM GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS
+                                              WHERE BFG_DISTRIBUTOR_ID =
+                                                       BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID)
+                                     AND account_type_id = 10)
+                      AND name IN
+                             (SELECT name
+                                FROM GBC_CORE.accounts
+                               WHERE     LOWER (name) IN
+                                            (SELECT LOWER (
+                                                       BFG_DISTRIBUTOR_NAME)
+                                               FROM GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS
+                                              WHERE BFG_DISTRIBUTOR_ID =
+                                                       BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID)
+                                     AND account_type_id = 10)
+                      AND active = 0;
+
+               --If partner company exists or not
+               IF (partner_company_count > 0)
+               THEN
+                  DBMS_OUTPUT.put_line (
+                     'partner company found, checking for customers');
+
+                  --PARTNER_COMPANY_ACCOUNT_ID
+                  SELECT account_id
+                    INTO partner_company_id
+                    FROM GBC_CORE.accounts
+                   WHERE     account_type_id = 20
+                         AND parent_id IN
+                                (SELECT account_id
+                                   FROM GBC_CORE.accounts
+                                  WHERE     LOWER (name) IN
+                                               (SELECT LOWER (
+                                                          BFG_DISTRIBUTOR_NAME)
+                                                  FROM GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS
+                                                 WHERE BFG_DISTRIBUTOR_ID =
+                                                          BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID)
+                                        AND account_type_id = 10)
+                         AND name IN
+                                (SELECT name
+                                   FROM GBC_CORE.accounts
+                                  WHERE     LOWER (name) IN
+                                               (SELECT LOWER (
+                                                          BFG_DISTRIBUTOR_NAME)
+                                                  FROM GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS
+                                                 WHERE BFG_DISTRIBUTOR_ID =
+                                                          BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID)
+                                        AND account_type_id = 10);
+
+                  DBMS_OUTPUT.put_line (
+                     'partner company account id -> ' || partner_company_id);
+
+                  FOR DISTRIBUTOR_ACC_ID
+                     IN (SELECT account_id AS gsp_distributor_id
+                           FROM GBC_CORE.accounts
+                          WHERE     LOWER (name) IN
+                                       (SELECT LOWER (BFG_DISTRIBUTOR_NAME)
+                                          FROM GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS
+                                         WHERE BFG_DISTRIBUTOR_ID =
+                                                  BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID)
+                                AND account_type_id = 10
+                                AND active = 0)
+                  LOOP
+                     DBMS_OUTPUT.put_line ('DISTRIBUTOR - CUSTOMER MAPPING');
+                     DBMS_OUTPUT.put_line (
+                           'distributor id '
+                        || BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID);
+                     DBMS_OUTPUT.put_line (
+                           'distributor account id - '
+                        || DISTRIBUTOR_ACC_ID.gsp_distributor_id);
+                     DBMS_OUTPUT.put_line (
+                        'customer exists' || customer_exists);
+
+
+
+                     --list of BFG customer ids for the particular distributor from TEMP_BFG_DIST_CUST_DETAILS table
+                     FOR DIST_CUST_ID
+                        IN (SELECT DISTINCT BFG_CUSTOMER_ID
+                              FROM GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS
+                             WHERE BFG_DISTRIBUTOR_ID =
+                                      BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID)
+                     LOOP
+                        DBMS_OUTPUT.put_line ('checking for BFG customer');
+                        DBMS_OUTPUT.put_line (
+                              'checking for BFG customer:id>>>>>>>> '
+                           || DIST_CUST_ID.BFG_CUSTOMER_ID);
+
+                        SELECT COUNT (*)
+                          INTO customer_exists
+                          FROM GBC_CORE.accounts
+                         WHERE     account_ref IN
+                                      (SELECT DISTINCT
+                                              CAST (
+                                                 DIST_CUST_ID.BFG_CUSTOMER_ID AS VARCHAR (50))
+                                         FROM GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS
+                                        WHERE BFG_DISTRIBUTOR_ID =
+                                                 BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID)
+                               AND account_type_id = 120
+                               AND active = 0;
+
+                        DBMS_OUTPUT.put_line (
+                           'customer exist -> ' || customer_exists);
+
+                        IF (customer_exists > 0)
+                        THEN
+                           DBMS_OUTPUT.put_line (
+                                 'DIST_CUST_ID.BFG_CUSTOMER_ID '
+                              || DIST_CUST_ID.BFG_CUSTOMER_ID);
+
+                           --BFG CUSTOMER LIST ACCOUNT ID AND NAME
+                           --cast(BFG_CUSTOMER_ID as varchar(50))
+
+                           FOR BFG_CUSTOMER
+                              IN (SELECT account_id, name, account_ref
+                                    FROM GBC_CORE.accounts
+                                   WHERE     account_ref IN
+                                                (SELECT DISTINCT
+                                                        CAST (
+                                                           DIST_CUST_ID.BFG_CUSTOMER_ID AS VARCHAR (50))
+                                                   FROM GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS
+                                                  WHERE BFG_DISTRIBUTOR_ID =
+                                                           BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID)
+                                         AND account_type_id = 120
+                                         AND active = 0)
+                           LOOP
+                              DBMS_OUTPUT.put_line (
+                                    'FOR:BFG_CUSTOMER.name > '
+                                 || BFG_CUSTOMER.name);
+
+                              SELECT COUNT (*)
+                                INTO bfg_customer_present
+                                FROM TEMP_BFG_CLASSIC_MAPPING
+                               WHERE BFG_CUS_ID IN BFG_CUSTOMER.account_ref;
+
+                              --R27 Fetch the list of BFG customer ids for the particular distributor from TEMP_BFG_DIST_CUST_DETAILS table
+
+                              --SELECT count(*) INTO bfg_customer_present FROM GBC_CORE.TEMP_BFG_CLASSIC_MAPPING where BFG_CUS_ID IN
+                              -- (SELECT DISTINCT BFG_CUSTOMER_ID FROM GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS
+                              --WHERE BFG_DISTRIBUTOR_ID =BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID) ;
+
+                              DBMS_OUTPUT.put_line (
+                                    'BFG customer bfg_customer_present '
+                                 || bfg_customer_present);
+
+                              IF (bfg_customer_present > 0)
+                              THEN                                      --ELSE
+                                 FOR CLASS_ACCOUNT
+                                    IN (SELECT CLASS_ACCOUNT_REF
+                                          FROM GBC_CORE.TEMP_BFG_CLASSIC_MAPPING
+                                         WHERE BFG_CUS_ID IN
+                                                  (BFG_CUSTOMER.account_ref))
+                                 LOOP
+                                    BEGIN
+                                       DBMS_OUTPUT.put_line (
+                                             'CLASS_ACCOUNT.CLASS_ACCOUNT_REF > '
+                                          || CLASS_ACCOUNT.CLASS_ACCOUNT_REF);
+
+                                       SELECT COUNT (*)
+                                         INTO class_acc_found
+                                         FROM GBC_CORE.TEMP_BFG_CLASSIC_MAPPING
+                                        WHERE CLASS_ACCOUNT_REF =
+                                                 CLASS_ACCOUNT.CLASS_ACCOUNT_REF;
+
+                                       DBMS_OUTPUT.put_line (
+                                             'BFG customer exists CLASS_ACCOUNT > '
+                                          || class_acc_found);
+
+                                       IF (class_acc_found > 0)
+                                       THEN
+                                          DBMS_OUTPUT.put_line (
+                                                'inside iff:BFG_CUSTOMER.name > '
+                                             || BFG_CUSTOMER.name);
+                                          DBMS_OUTPUT.put_line (
+                                                'comp_cust_found:DISTRIBUTOR_ACC_ID.gsp_distributor_id > '
+                                             || DISTRIBUTOR_ACC_ID.gsp_distributor_id);
+
+                                          SELECT COUNT (*)
+                                            INTO comp_cust_found
+                                            FROM accounts
+                                           WHERE     name = BFG_CUSTOMER.name
+                                                 AND parent_id =
+                                                        DISTRIBUTOR_ACC_ID.gsp_distributor_id
+                                                 AND account_type_id = 20
+                                                 AND active = 0;
+
+                                          DBMS_OUTPUT.put_line (
+                                                'comp_cust_found > '
+                                             || comp_cust_found);
+
+                                          IF (comp_cust_found > 0)
+                                          THEN
+                                             DBMS_OUTPUT.put_line (
+                                                'comp_cust_found :if ');
+
+                                             SELECT account_id
+                                               INTO exist_acc_id
+                                               FROM accounts
+                                              WHERE     name =
+                                                           BFG_CUSTOMER.name
+                                                    AND parent_id =
+                                                           DISTRIBUTOR_ACC_ID.gsp_distributor_id
+                                                    AND account_type_id = 20
+                                                    AND active = 0;
+                                          END IF;
+
+                                          DBMS_OUTPUT.put_line (
+                                                'exist_acc_id -> '
+                                             || exist_acc_id);
+                                          DBMS_OUTPUT.put_line (
+                                                'comp_cust_found BFG_CUSTOMER.name -> '
+                                             || BFG_CUSTOMER.name);
+
+                                          IF (comp_cust_found <= 0)
+                                          THEN
+                                             DBMS_OUTPUT.put_line (
+                                                'inside new company creation');
+
+                                             --CREATE COMPANY
+                                             SELECT SEQ_ACCOUNT_ID.NEXTVAL
+                                               INTO ins_comp_accnt_id
+                                               FROM DUAL;
+
+                                             DBMS_OUTPUT.put_line (
+                                                   'New company Account ID -> '
+                                                || ins_comp_accnt_id);
+                                             DBMS_OUTPUT.put_line (
+                                                   'New company BFG_CUSTOMER.name -> '
+                                                || BFG_CUSTOMER.name);
+
+                                             INSERT INTO GBC_CORE.ACCOUNTS
+                                                SELECT ins_comp_accnt_id,
+                                                       NULL,
+                                                       BFG_CUSTOMER.name,
+                                                       BFG_CUSTOMER.name,
+                                                       0,
+                                                       SYSDATE,
+                                                       SYSDATE,
+                                                       SYSDATE,
+                                                       0,
+                                                       NULL,
+                                                       NULL,
+                                                       8,
+                                                       DISTRIBUTOR_ACC_ID.gsp_distributor_id,
+                                                       NULL,
+                                                       NULL,
+                                                       20,
+                                                       0,
+                                                       6,
+                                                       'N',
+                                                       'N',
+                                                       40,
+                                                       'Y'
+                                                  FROM DUAL
+                                                 WHERE NOT EXISTS
+                                                              (SELECT *
+                                                                 FROM ACCOUNTS
+                                                                WHERE     ACCOUNT_ID =
+                                                                             ins_comp_accnt_id
+                                                                      AND active =
+                                                                             0);
+
+                                             --Insert into account_details as well
+                                             DBMS_OUTPUT.put_line (
+                                                'Insert into account_details');
+
+                                             INSERT INTO GBC_CORE.ACCOUNT_DETAILS
+                                                SELECT ins_comp_accnt_id,
+                                                       NULL,
+                                                       NULL,
+                                                       NULL,
+                                                       '237',
+                                                       '3248',
+                                                       NULL,
+                                                       NULL,
+                                                       NULL
+                                                  FROM DUAL
+                                                 WHERE NOT EXISTS
+                                                              (SELECT *
+                                                                 FROM ACCOUNT_DETAILS
+                                                                WHERE ACCOUNT_ID =
+                                                                         ins_comp_accnt_id);
+
+                                             DBMS_OUTPUT.put_line (
+                                                'sucessfully creation of new company');
+                                          ELSE
+                                             DBMS_OUTPUT.put_line (
+                                                   'Existing company > '
+                                                || exist_acc_id);
+
+                                             --existing hai toh classic and BFG customer map hai ya nhi, if not map it
+                                             --Existing company mapping to classic customer
+                                             SELECT COUNT (*)
+                                               INTO class_account_else_fetch
+                                               FROM GBC_CORE.ACCOUNTS
+                                              WHERE     account_ref =
+                                                           CLASS_ACCOUNT.CLASS_ACCOUNT_REF
+                                                    AND account_type_id = 30
+                                                    AND remote_system_id = 4
+                                                    AND active = 0;
+
+                                             DBMS_OUTPUT.put_line (
+                                                   'Existing company: class_account_else_fetch > '
+                                                || class_account_else_fetch);
+
+                                             IF (class_account_else_fetch > 0)
+                                             THEN
+                                                SELECT ACCOUNT_ID
+                                                  INTO class_account_id
+                                                  FROM GBC_CORE.ACCOUNTS
+                                                 WHERE     account_ref =
+                                                              CLASS_ACCOUNT.CLASS_ACCOUNT_REF
+                                                       AND account_type_id =
+                                                              30
+                                                       AND remote_system_id =
+                                                              4
+                                                       AND active = 0;
+
+                                                --IF: Existing company mapping to CLASSIC customer
+                                                SELECT COUNT (*)
+                                                  INTO classic_existcomp_mapping
+                                                  FROM account_maps
+                                                 WHERE     MAPPED_ACCOUNT_ID =
+                                                              class_account_id
+                                                       AND ACCOUNT_ID =
+                                                              exist_acc_id;
+
+                                                DBMS_OUTPUT.put_line (
+                                                      'CLASSIC CUSTOMER to EXISTING: classic_existcomp_mapping > '
+                                                   || classic_existcomp_mapping);
+
+                                                IF (classic_existcomp_mapping =
+                                                       0)
+                                                THEN
+                                                   --account_id of classic customer mapped to classic account to existing company
+                                                   DBMS_OUTPUT.put_line (
+                                                      'CLASSIC CUSTOMER to EXISTING company');
+
+                                                   INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                        VALUES (
+                                                                  6,
+                                                                  class_account_id,
+                                                                  exist_acc_id,
+                                                                  1,
+                                                                  1);
+                                                ELSE
+                                                   DBMS_OUTPUT.put_line (
+                                                         'CLASSIC CUSTOMER MAPPING NOT FOUND TO EXISTING COMPANY > '
+                                                      || exist_acc_id);
+                                                END IF;
+
+                                                --IF: Existing company mapping to BFG customer
+                                                SELECT COUNT (*)
+                                                  INTO bfg_existcomp_mapping
+                                                  FROM account_maps
+                                                 WHERE     MAPPED_ACCOUNT_ID =
+                                                              BFG_CUSTOMER.account_id
+                                                       AND ACCOUNT_ID =
+                                                              exist_acc_id;
+
+                                                DBMS_OUTPUT.put_line (
+                                                      'ELSE: BFG CUSTOMER to EXISTING: bfg_existcomp_mapping > '
+                                                   || bfg_existcomp_mapping);
+
+                                                IF (bfg_existcomp_mapping = 0)
+                                                THEN
+                                                   --BFG CUSTOMER MAPPING TO NEWLY CREATED COMPANY
+                                                   DBMS_OUTPUT.put_line (
+                                                      'ELSE: BFG CUSTOMER MAPPING TO EXISTING COMPANY');
+
+                                                   INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                        VALUES (
+                                                                  1,
+                                                                  BFG_CUSTOMER.account_id,
+                                                                  exist_acc_id,
+                                                                  1,
+                                                                  1);
+                                                ELSE
+                                                   DBMS_OUTPUT.put_line (
+                                                         'ELSE: BFG CUSTOMER MAPPING NOT FOUND TO EXISTING COMPANY:Account_id > '
+                                                      || exist_acc_id);
+                                                END IF;
+                                             ELSE
+                                                DBMS_OUTPUT.put_line (
+                                                   'inside else:else: create company');
+
+                                                SELECT SEQ_ACCOUNT_ID.NEXTVAL
+                                                  INTO account_class_else_val
+                                                  FROM DUAL;
+
+                                                INSERT INTO GBC_CORE.ACCOUNTS
+                                                     VALUES (
+                                                               account_class_else_val,
+                                                               CLASS_ACCOUNT.CLASS_ACCOUNT_REF,
+                                                               BFG_CUSTOMER.name,
+                                                               BFG_CUSTOMER.name,
+                                                               0,
+                                                               SYSDATE,
+                                                               SYSDATE,
+                                                               SYSDATE,
+                                                               0,
+                                                               NULL,
+                                                               NULL,
+                                                               4,
+                                                               NULL,
+                                                               NULL,
+                                                               NULL,
+                                                               30,
+                                                               0,
+                                                               3,
+                                                               'N',
+                                                               'N',
+                                                               40,
+                                                               'N');
+
+                                                --Existing company mapping to CLASSIC customer
+                                                SELECT COUNT (*)
+                                                  INTO classic_existcomp_mapping
+                                                  FROM account_maps
+                                                 WHERE     MAPPED_ACCOUNT_ID =
+                                                              account_class_else_val
+                                                       AND ACCOUNT_ID =
+                                                              exist_acc_id;
+
+                                                DBMS_OUTPUT.put_line (
+                                                      'ELSE: CLASSIC CUSTOMER to EXISTING: classic_existcomp_mapping > '
+                                                   || classic_existcomp_mapping);
+
+                                                IF (classic_existcomp_mapping =
+                                                       0)
+                                                THEN
+                                                   --account_id of classic customer mapped to classic account to existing company
+                                                   DBMS_OUTPUT.put_line (
+                                                      'ELSE: CLASSIC CUSTOMER to EXISTING company');
+
+                                                   INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                        VALUES (
+                                                                  6,
+                                                                  account_class_else_val,
+                                                                  exist_acc_id,
+                                                                  1,
+                                                                  1);
+                                                ELSE
+                                                   DBMS_OUTPUT.put_line (
+                                                         'ELSE: CLASSIC CUSTOMER MAPPING NOT FOUND TO EXISTING COMPANY > '
+                                                      || exist_acc_id);
+                                                END IF;
+
+                                                --Existing company mapping to BFG customer
+                                                SELECT COUNT (*)
+                                                  INTO bfg_existcomp_mapping
+                                                  FROM account_maps
+                                                 WHERE     MAPPED_ACCOUNT_ID =
+                                                              BFG_CUSTOMER.account_id
+                                                       AND ACCOUNT_ID =
+                                                              exist_acc_id;
+
+                                                DBMS_OUTPUT.put_line (
+                                                      'ELSE: BFG CUSTOMER to EXISTING: bfg_existcomp_mapping > '
+                                                   || bfg_existcomp_mapping);
+
+                                                IF (bfg_existcomp_mapping = 0)
+                                                THEN
+                                                   --BFG CUSTOMER MAPPING TO NEWLY CREATED COMPANY
+                                                   DBMS_OUTPUT.put_line (
+                                                      'ELSE: BFG CUSTOMER MAPPING TO EXISTING COMPANY');
+
+                                                   INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                        VALUES (
+                                                                  1,
+                                                                  BFG_CUSTOMER.account_id,
+                                                                  exist_acc_id,
+                                                                  1,
+                                                                  1);
+                                                ELSE
+                                                   DBMS_OUTPUT.put_line (
+                                                         'ELSE: BFG CUSTOMER MAPPING NOT FOUND TO EXISTING COMPANY:Account_id > '
+                                                      || exist_acc_id);
+                                                END IF;
+                                             END IF;
+                                          END IF;
+
+                                          COMMIT;
+
+                                          -- company hai ya tune create kardi (2.8)
+                                          SELECT COUNT (*)
+                                            INTO class_account_fetch
+                                            FROM GBC_CORE.ACCOUNTS
+                                           WHERE     account_ref =
+                                                        CLASS_ACCOUNT.CLASS_ACCOUNT_REF
+                                                 AND account_type_id = 30
+                                                 AND remote_system_id = 4
+                                                 AND active = 0;
+
+                                          DBMS_OUTPUT.put_line (
+                                                'class_account_fetch '
+                                             || class_account_fetch);
+
+                                          IF (class_account_fetch > 0)
+                                          THEN     --If classic customer found
+                                             SELECT ACCOUNT_ID
+                                               INTO class_account_id
+                                               FROM GBC_CORE.ACCOUNTS
+                                              WHERE     account_ref =
+                                                           CLASS_ACCOUNT.CLASS_ACCOUNT_REF
+                                                    AND account_type_id = 30
+                                                    AND remote_system_id = 4
+                                                    AND active = 0;
+
+                                             DBMS_OUTPUT.put_line (
+                                                   'CLASSIC account to partner company:partner company id ->'
+                                                || partner_company_id);
+                                             DBMS_OUTPUT.put_line (
+                                                   'CLASSIC account to partner company:classic account id ->'
+                                                || class_account_id);
+                                             DBMS_OUTPUT.put_line (
+                                                'Mapping CLASSIC account to partner company');
+
+                                             --map classic account to partner company
+                                             --INSERT  INTO GBC_CORE.ACCOUNT_MAPS VALUES (6,class_account_id,partner_company_id,1,1)
+                                             --INSERT  INTO GBC_CORE.ACCOUNT_MAPS SELECT 6,class_account_id,partner_company_id,1,1
+                                             --FROM dual WHERE NOT EXISTS (SELECT * FROM account_maps WHERE mapped_account_id =class_account_id AND account_id= partner_company_id);
+
+                                             -- pick account_id of that classic customer and map classic account to partner company
+
+                                             SELECT ACCOUNT_ID
+                                               INTO class_account_id
+                                               FROM GBC_CORE.ACCOUNTS
+                                              WHERE     account_ref =
+                                                           CLASS_ACCOUNT.CLASS_ACCOUNT_REF
+                                                    AND account_type_id = 30
+                                                    AND remote_system_id = 4
+                                                    AND active = 0;
+
+                                             --Check whether classic customer account_id already mapped to partner company
+                                             DBMS_OUTPUT.put_line (
+                                                   'class_account_id '
+                                                || class_account_id);
+                                             DBMS_OUTPUT.put_line (
+                                                   'partner_company_id '
+                                                || partner_company_id);
+
+                                             SELECT COUNT (*)
+                                               INTO classic_partner_mapping
+                                               FROM account_maps
+                                              WHERE     MAPPED_ACCOUNT_ID =
+                                                           class_account_id
+                                                    AND ACCOUNT_ID =
+                                                           partner_company_id;
+
+                                             DBMS_OUTPUT.put_line (
+                                                   'classic_partner_mapping '
+                                                || classic_partner_mapping);
+
+                                             IF (classic_partner_mapping = 0)
+                                             THEN
+                                                ----CLASSIC CUSTOMER MAPPING TO PARTNER COMPANY
+                                                DBMS_OUTPUT.put_line (
+                                                      'CLASSIC customer to partner company:partner company id ->'
+                                                   || partner_company_id);
+
+                                                INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                     VALUES (
+                                                               6,
+                                                               class_account_id,
+                                                               partner_company_id,
+                                                               1,
+                                                               1);
+                                             ELSE
+                                                DBMS_OUTPUT.put_line (
+                                                      'CLASSIC CUSTOMER MAPPING NOT FOUND TO PARTNER COMPANY:MAPPED_ACCOUNT_ID > '
+                                                   || class_account_id);
+                                             END IF;
+
+                                             --    pick account_id of classic customer mapped to newly created company
+
+                                             ----CLASSIC CUSTOMER MAPPING TO NEWLY CREATED COMPANY
+                                             IF (   ins_comp_accnt_id != NULL
+                                                 OR ins_comp_accnt_id != '')
+                                             THEN
+                                                DBMS_OUTPUT.put_line (
+                                                      'ins_comp_accnt_id '
+                                                   || ins_comp_accnt_id);
+
+                                                SELECT COUNT (*)
+                                                  INTO classic_newlycomp_mapping
+                                                  FROM account_maps
+                                                 WHERE     MAPPED_ACCOUNT_ID =
+                                                              class_account_id
+                                                       AND ACCOUNT_ID =
+                                                              ins_comp_accnt_id;
+
+                                                IF (classic_newlycomp_mapping =
+                                                       0)
+                                                THEN
+                                                   --account_id of classic customer mapped to classic account to newly created company
+                                                   DBMS_OUTPUT.put_line (
+                                                      'classic account to newly created company');
+
+                                                   INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                        VALUES (
+                                                                  6,
+                                                                  class_account_id,
+                                                                  ins_comp_accnt_id,
+                                                                  1,
+                                                                  1);
+                                                ELSE
+                                                   DBMS_OUTPUT.put_line (
+                                                         'CLASSIC CUSTOMER MAPPING NOT FOUND TO NEWLY COMPANY:MAPPED_ACCOUNT_ID > '
+                                                      || class_account_id);
+                                                END IF;
+                                             END IF;
+
+
+                                             --    pick account_id of that BFG customer and map BFG account to partner company
+                                             --Check whether BFG customer account_id already mapped to partner company
+                                             SELECT COUNT (*)
+                                               INTO bfg_partner_mapping
+                                               FROM account_maps
+                                              WHERE     MAPPED_ACCOUNT_ID =
+                                                           BFG_CUSTOMER.account_id
+                                                    AND ACCOUNT_ID =
+                                                           partner_company_id;
+
+                                             IF (bfg_partner_mapping = 0)
+                                             THEN
+                                                --BFG CUSTOMER MAPPING TO PARTNER COMPANY
+                                                DBMS_OUTPUT.put_line (
+                                                   'BFG CUSTOMER MAPPING TO PARTNER COMPANY');
+
+                                                INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                     VALUES (
+                                                               1,
+                                                               BFG_CUSTOMER.account_id,
+                                                               partner_company_id,
+                                                               1,
+                                                               1);
+                                             ELSE
+                                                DBMS_OUTPUT.put_line (
+                                                      'BFG CUSTOMER MAPPING NOT FOUND TO PARTNER COMPANY:MAPPED_ACCOUNT_ID > '
+                                                   || BFG_CUSTOMER.account_id);
+                                             END IF;
+
+                                             --    pick account_id of that BFG customer and map BFG account to newly created company
+                                             --Check whether BFG customer account_id already mapped to newly created company
+                                             IF (   ins_comp_accnt_id != NULL
+                                                 OR ins_comp_accnt_id != '')
+                                             THEN
+                                                SELECT COUNT (*)
+                                                  INTO bfg_newcomp_mapping
+                                                  FROM account_maps
+                                                 WHERE     MAPPED_ACCOUNT_ID =
+                                                              BFG_CUSTOMER.account_id
+                                                       AND ACCOUNT_ID =
+                                                              ins_comp_accnt_id;
+
+                                                IF (bfg_newcomp_mapping = 0)
+                                                THEN
+                                                   --BFG CUSTOMER MAPPING TO NEWLY CREATED COMPANY
+                                                   DBMS_OUTPUT.put_line (
+                                                      'BFG CUSTOMER MAPPING TO NEWLY CREATED COMPANY');
+
+                                                   INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                        VALUES (
+                                                                  1,
+                                                                  BFG_CUSTOMER.account_id,
+                                                                  ins_comp_accnt_id,
+                                                                  1,
+                                                                  1);
+                                                ELSE
+                                                   DBMS_OUTPUT.put_line (
+                                                         'BFG CUSTOMER MAPPING NOT FOUND TO NEWLY COMPANY:MAPPED_ACCOUNT_ID > '
+                                                      || BFG_CUSTOMER.account_id);
+                                                END IF;
+                                             END IF;
+
+                                             --CLASSIC CUSTOMER TO DISTRIBUTOR MAPPING
+                                             SELECT COUNT (*)
+                                               INTO classic_dist_map
+                                               FROM account_maps
+                                              WHERE     MAPPED_ACCOUNT_ID =
+                                                           class_account_id
+                                                    AND ACCOUNT_ID =
+                                                           DISTRIBUTOR_ACC_ID.gsp_distributor_id;
+
+                                             DBMS_OUTPUT.put_line (
+                                                   'classic_dist_map COUNT > '
+                                                || classic_dist_map);
+
+                                             IF (classic_dist_map = 0)
+                                             THEN
+                                                DBMS_OUTPUT.put_line (
+                                                   'CLASSIC CUSTOMER MAPPING TO DISTRIBUTOR');
+
+                                                INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                     VALUES (
+                                                               6,
+                                                               class_account_id,
+                                                               DISTRIBUTOR_ACC_ID.gsp_distributor_id,
+                                                               1,
+                                                               1);
+                                             ELSE
+                                                DBMS_OUTPUT.put_line (
+                                                      'CLASSIC CUSTOMER MAPPING NOT FOUND TO NEWLY COMPANY:MAPPED_ACCOUNT_ID > '
+                                                   || class_account_id);
+                                             END IF;
+
+                                             --BFG CUSTOMER TO DISTRIBUTOR MAPPING
+                                             SELECT COUNT (*)
+                                               INTO bfg_dist_map
+                                               FROM account_maps
+                                              WHERE     MAPPED_ACCOUNT_ID =
+                                                           BFG_CUSTOMER.account_id
+                                                    AND ACCOUNT_ID =
+                                                           DISTRIBUTOR_ACC_ID.gsp_distributor_id;
+
+                                             DBMS_OUTPUT.put_line (
+                                                   'bfg_dist_map COUNT > '
+                                                || bfg_dist_map);
+
+                                             IF (bfg_dist_map = 0)
+                                             THEN
+                                                DBMS_OUTPUT.put_line (
+                                                   'BFG CUSTOMER MAPPING TO DISTRIBUTOR');
+
+                                                INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                     VALUES (
+                                                               1,
+                                                               BFG_CUSTOMER.account_id,
+                                                               DISTRIBUTOR_ACC_ID.gsp_distributor_id,
+                                                               1,
+                                                               1);
+                                             ELSE
+                                                DBMS_OUTPUT.put_line (
+                                                      'BFG CUSTOMER MAPPING NOT FOUND TO NEWLY COMPANY:MAPPED_ACCOUNT_ID > '
+                                                   || BFG_CUSTOMER.account_id);
+                                             END IF;
+
+                                             COMMIT;
+                                          ELSE --2.9.    If classic customer NOT found
+                                             DBMS_OUTPUT.put_line (
+                                                'inside else');
+
+                                             --CREATE CLASSIC CUSTOMER (Classic customer Insertion in GSP)
+                                             SELECT SEQ_ACCOUNT_ID.NEXTVAL
+                                               INTO account_class_else_val
+                                               FROM DUAL;
+
+                                             INSERT INTO GBC_CORE.ACCOUNTS
+                                                  VALUES (
+                                                            account_class_else_val,
+                                                            CLASS_ACCOUNT.CLASS_ACCOUNT_REF,
+                                                            BFG_CUSTOMER.name,
+                                                            BFG_CUSTOMER.name,
+                                                            0,
+                                                            SYSDATE,
+                                                            SYSDATE,
+                                                            SYSDATE,
+                                                            0,
+                                                            NULL,
+                                                            NULL,
+                                                            4,
+                                                            NULL,
+                                                            NULL,
+                                                            NULL,
+                                                            30,
+                                                            0,
+                                                            3,
+                                                            'N',
+                                                            'N',
+                                                            40,
+                                                            'N');
+
+                                             --Classic customer mapping to Partner company and newly created company
+
+                                             --Check whether classic customer account_id already mapped to partner company
+                                             SELECT COUNT (*)
+                                               INTO class_cust_partner_map
+                                               FROM account_maps
+                                              WHERE     MAPPED_ACCOUNT_ID =
+                                                           account_class_else_val
+                                                    AND ACCOUNT_ID =
+                                                           partner_company_id;
+
+                                             IF (class_cust_partner_map = 0)
+                                             THEN
+                                                DBMS_OUTPUT.put_line (
+                                                   'ELSE: Classic customer mapping to Partner company');
+
+                                                --CLASSIC CUSTOMER MAPPING TO PARTNER COMPANY
+                                                INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                     VALUES (
+                                                               6,
+                                                               account_class_else_val,
+                                                               partner_company_id,
+                                                               1,
+                                                               1);
+                                             END IF;
+
+                                             --6.3.    Check whether classic customer account_id already mapped to company created
+                                             SELECT COUNT (*)
+                                               INTO class_cust_new_comp_map
+                                               FROM account_maps
+                                              WHERE     MAPPED_ACCOUNT_ID =
+                                                           account_class_else_val
+                                                    AND ACCOUNT_ID =
+                                                           ins_comp_accnt_id;
+
+                                             IF (class_cust_new_comp_map = 0)
+                                             THEN
+                                                --CLASSIC CUSTOMER MAPPING TO NEWLY CREATED COMPANY
+                                                DBMS_OUTPUT.put_line (
+                                                   'ELSE: CLASSIC CUSTOMER MAPPING TO NEWLY CREATED COMPANY');
+
+                                                IF (   ins_comp_accnt_id !=
+                                                          NULL
+                                                    OR ins_comp_accnt_id !=
+                                                          '')
+                                                THEN
+                                                   INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                      SELECT 6,
+                                                             account_class_else_val,
+                                                             ins_comp_accnt_id,
+                                                             1,
+                                                             1
+                                                        FROM DUAL
+                                                       WHERE NOT EXISTS
+                                                                    (SELECT *
+                                                                       FROM account_maps
+                                                                      WHERE     mapped_account_id =
+                                                                                   account_class_else_val
+                                                                            AND account_id =
+                                                                                   ins_comp_accnt_id);
+                                                END IF;
+                                             END IF;
+
+                                             --BFG customer mapping to Partner company and newly created company
+
+                                             --Check whether BFG customer account_id mapped to partner company
+                                             SELECT COUNT (*)
+                                               INTO bfg_cust_partner_map
+                                               FROM account_maps
+                                              WHERE     MAPPED_ACCOUNT_ID =
+                                                           BFG_CUSTOMER.account_id
+                                                    AND ACCOUNT_ID =
+                                                           partner_company_id;
+
+                                             IF (bfg_cust_partner_map = 0)
+                                             THEN
+                                                --BFG CUSTOMER MAPPING TO PARTNER COMPANY
+                                                DBMS_OUTPUT.put_line (
+                                                   'ELSE: BFG CUSTOMER MAPPING TO PARTNER COMPANY');
+
+                                                INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                   SELECT 1,
+                                                          BFG_CUSTOMER.account_id,
+                                                          partner_company_id,
+                                                          1,
+                                                          1
+                                                     FROM DUAL
+                                                    WHERE NOT EXISTS
+                                                                 (SELECT *
+                                                                    FROM account_maps
+                                                                   WHERE     mapped_account_id =
+                                                                                BFG_CUSTOMER.account_id
+                                                                         AND account_id =
+                                                                                partner_company_id);
+                                             END IF;
+
+                                             --Check whether BFG customer account_id mapped to newly company created
+                                             SELECT COUNT (*)
+                                               INTO bfg_cust_new_comp_map
+                                               FROM account_maps
+                                              WHERE     MAPPED_ACCOUNT_ID =
+                                                           BFG_CUSTOMER.account_id
+                                                    AND ACCOUNT_ID =
+                                                           ins_comp_accnt_id;
+
+                                             IF (bfg_cust_new_comp_map = 0)
+                                             THEN
+                                                --BFG CUSTOMER MAPPING TO NEWLY CREATED COMPANY
+                                                DBMS_OUTPUT.put_line (
+                                                   'ELSE: BFG CUSTOMER MAPPING TO NEWLY CREATED COMPANY');
+
+                                                INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                     VALUES (
+                                                               1,
+                                                               BFG_CUSTOMER.account_id,
+                                                               ins_comp_accnt_id,
+                                                               1,
+                                                               1);
+                                             END IF;
+
+                                             COMMIT;
+
+                                             ---------
+
+                                             --CLASSIC CUSTOMER TO DISTRIBUTOR MAPPING
+                                             SELECT COUNT (*)
+                                               INTO classic_dist_else_map
+                                               FROM account_maps
+                                              WHERE     MAPPED_ACCOUNT_ID =
+                                                           account_class_else_val
+                                                    AND ACCOUNT_ID =
+                                                           DISTRIBUTOR_ACC_ID.gsp_distributor_id;
+
+                                             DBMS_OUTPUT.put_line (
+                                                   'ELSE:classic_dist_map COUNT > '
+                                                || classic_dist_map);
+
+                                             IF (classic_dist_map = 0)
+                                             THEN
+                                                DBMS_OUTPUT.put_line (
+                                                   'ELSE:CLASSIC CUSTOMER MAPPING TO DISTRIBUTOR');
+
+                                                INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                     VALUES (
+                                                               6,
+                                                               account_class_else_val,
+                                                               DISTRIBUTOR_ACC_ID.gsp_distributor_id,
+                                                               1,
+                                                               1);
+                                             ELSE
+                                                DBMS_OUTPUT.put_line (
+                                                      'ELSE:CLASSIC CUSTOMER MAPPING NOT FOUND TO NEWLY COMPANY:MAPPED_ACCOUNT_ID > '
+                                                   || class_account_id);
+                                             END IF;
+
+                                             --BFG CUSTOMER TO DISTRIBUTOR MAPPING
+                                             SELECT COUNT (*)
+                                               INTO bfg_dist_else_map
+                                               FROM account_maps
+                                              WHERE     MAPPED_ACCOUNT_ID =
+                                                           BFG_CUSTOMER.account_id
+                                                    AND ACCOUNT_ID =
+                                                           DISTRIBUTOR_ACC_ID.gsp_distributor_id;
+
+                                             DBMS_OUTPUT.put_line (
+                                                   'ELSE:bfg_dist_map COUNT > '
+                                                || bfg_dist_map);
+
+                                             IF (bfg_dist_map = 0)
+                                             THEN
+                                                DBMS_OUTPUT.put_line (
+                                                   'ELSE:BFG CUSTOMER MAPPING TO DISTRIBUTOR');
+                                                DBMS_OUTPUT.put_line (
+                                                      'ELSE:BFG_CUSTOMER.account_id > '
+                                                   || BFG_CUSTOMER.account_id);
+                                                DBMS_OUTPUT.put_line (
+                                                      'ELSE:DISTRIBUTOR_ACC_ID.gsp_distributor_id > '
+                                                   || DISTRIBUTOR_ACC_ID.gsp_distributor_id);
+
+                                                INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                                   SELECT 1,
+                                                          BFG_CUSTOMER.account_id,
+                                                          DISTRIBUTOR_ACC_ID.gsp_distributor_id,
+                                                          1,
+                                                          1
+                                                     FROM DUAL
+                                                    WHERE NOT EXISTS
+                                                                 (SELECT *
+                                                                    FROM account_maps
+                                                                   WHERE     MAPPED_ACCOUNT_ID =
+                                                                                BFG_CUSTOMER.account_id
+                                                                         AND ACCOUNT_ID =
+                                                                                DISTRIBUTOR_ACC_ID.gsp_distributor_id);
+                                             --INSERT INTO GBC_CORE.ACCOUNT_MAPS VALUES (1, BFG_CUSTOMER.account_id, DISTRIBUTOR_ACC_ID.gsp_distributor_id, 1, 1);
+                                             ELSE
+                                                DBMS_OUTPUT.put_line (
+                                                      'ELSE:BFG CUSTOMER MAPPING NOT FOUND TO NEWLY COMPANY:MAPPED_ACCOUNT_ID > '
+                                                   || BFG_CUSTOMER.account_id);
+                                             END IF;
+                                          ---------
+                                          END IF; --class_account_fetch (If classic account found check)
+                                       END IF;
+                                    --ELSE
+
+                                    EXCEPTION
+                                       WHEN OTHERS
+                                       THEN
+                                          DBMS_OUTPUT.put_line (SQLERRM);
+                                    END;
+                                 END LOOP;
+                              ELSE
+                                 --BFG CUSTOMER TO PARTNER COMPANY MAPPING
+                                 DBMS_OUTPUT.put_line (
+                                    'BFG CUSTOMER TO PARTNER COMPANY MAPPING:inside else ');
+
+                                 SELECT COUNT (*)
+                                   INTO customer_mapping
+                                   FROM account_maps
+                                  WHERE     MAPPED_ACCOUNT_ID =
+                                               BFG_CUSTOMER.account_id
+                                        AND ACCOUNT_ID = partner_company_id;
+
+                                 DBMS_OUTPUT.put_line (
+                                    'customer_mapping > ' || customer_mapping);
+
+                                 IF (customer_mapping = 0)
+                                 THEN
+                                    INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                         VALUES (1,
+                                                 BFG_CUSTOMER.account_id,
+                                                 partner_company_id,
+                                                 1,
+                                                 1);
+                                 END IF;
+
+                                 --BFG CUSTOMER TO DISTRIBUTOR MAPPING
+                                 SELECT COUNT (*)
+                                   INTO distributor_mapping
+                                   FROM account_maps
+                                  WHERE     MAPPED_ACCOUNT_ID =
+                                               BFG_CUSTOMER.account_id
+                                        AND ACCOUNT_ID =
+                                               DISTRIBUTOR_ACC_ID.gsp_distributor_id;
+
+                                 DBMS_OUTPUT.put_line (
+                                       'distributor_mapping > '
+                                    || distributor_mapping);
+
+                                 IF (distributor_mapping = 0)
+                                 THEN
+                                    INSERT INTO GBC_CORE.ACCOUNT_MAPS
+                                       SELECT 1,
+                                              BFG_CUSTOMER.account_id,
+                                              partner_company_id,
+                                              1,
+                                              1
+                                         FROM DUAL
+                                        WHERE NOT EXISTS
+                                                     (SELECT *
+                                                        FROM account_maps
+                                                       WHERE     mapped_account_id =
+                                                                    BFG_CUSTOMER.account_id
+                                                             AND account_id =
+                                                                    partner_company_id);
+                                 END IF;
+
+                                 COMMIT;
+                              END IF;
+                           --R27 Ends
+
+                           END LOOP;
+                        ELSE
+                           DBMS_OUTPUT.put_line (
+                                 'BFG Customer not fount in GSP, Customer ID>> >'
+                              || DIST_CUST_ID.BFG_CUSTOMER_ID);
+                        END IF;
+                     END LOOP;
+
+
+                     COMMIT;
+                  END LOOP;
+				  
+				        --INSERT INDIRECT COMPANY TO NNI_TABLE
+				        FOR NNI
+                     IN (SELECT 
+                        (SELECT NAME FROM ACCOUNTS AC where AC.ACCOUNT_ID=ACC.PARENT_ID) as DITRIBUTOR_NAME,
+                        (SELECT MAPPED_ACCOUNT_ID from ACCOUNT_MAPS AM where AM.ACCOUNT_ID=ACC.ACCOUNT_ID AND AM.MAP_TYPE_ID=6 AND ROWNUM = 1) as CLS_ID,
+                        ACC.NAME as COMPANY_NAME,
+                        ACC.ACCOUNT_ID as COMPANY_ID,
+                        ACC.CREATION_DATE FROM GBC_CORE.ACCOUNTS ACC
+                          WHERE ACC.account_type_id = 20
+                                AND ACC.parent_id IN
+                                       (SELECT account_id
+                                          FROM GBC_CORE.accounts
+                                         WHERE     LOWER (name) IN
+                                                      (SELECT LOWER (
+                                                                 BFG_DISTRIBUTOR_NAME)
+                                                         FROM GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS
+                                                        WHERE BFG_DISTRIBUTOR_ID IN(SELECT DISTINCT BFG_DISTRIBUTOR_ID FROM TEMP_BFG_DIST_CUST_DETAILS))
+                                               AND account_type_id = 10
+                                               AND active = 0))
+                  LOOP
+                   --INSERT TO NNI_REPORT_MAIL TABLE
+                    SELECT COUNT (*)
+                                   INTO NNI_EMAIL_COUNT
+                                   FROM NNI_REPORT_MAIL NR
+                                  WHERE     NR.COMPANY_ACCOUNT_ID =
+                                               NNI.COMPANY_ID AND NR.CLASSIC_CUSTOMER_ID=NNI.CLS_ID;
+                      
+                   DBMS_OUTPUT.put_line (
+                                       'NNI_EMAIL_COUNT > '
+                                    || NNI_EMAIL_COUNT);
+                     IF (NNI_EMAIL_COUNT = 0)
+                     THEN
+                      DBMS_OUTPUT.put_line ('NNI DITRIBUTOR_NAME > '||NNI.DITRIBUTOR_NAME);
+                      DBMS_OUTPUT.put_line ('NNI CLS_ID> '||NNI.CLS_ID);
+                      insert into gbc_core.nni_report_mail(
+                      NNI_EMAIL_ID,
+                      DISTRIBUTOR_NAME,
+                      COMPANY_NAME,
+                      CLASSIC_CUSTOMER_ID,
+                      PROCESS_STATUS,
+                      EMAIL_STATUS,
+                      COMPANY_ACCOUNT_ID,
+                      BFG_CUSTOMER_NAME,
+                      INSERT_DATE,
+                      UPDATE_DATE
+                    ) VALUES (
+                      SEQ_NNI_EMAIL_ID.nextval,
+                      NNI.DITRIBUTOR_NAME,
+                      NNI.COMPANY_NAME,
+                      NNI.CLS_ID,
+                      'P',
+                      'P',
+                      NNI.COMPANY_ID,
+                      NNI.COMPANY_NAME,
+                      SYSDATE,
+                      SYSDATE
+                    );
+					END IF;                                 
+      COMMIT;                 
+      END LOOP;
+				   
+
+                  --ASSIGNING SSO TO INDIRECT COMPANY
+                  FOR COMP
+                     IN (SELECT account_id
+                           FROM GBC_CORE.ACCOUNTS
+                          WHERE     account_type_id = 20
+                                AND parent_id IN
+                                       (SELECT account_id
+                                          FROM GBC_CORE.accounts
+                                         WHERE     LOWER (name) IN
+                                                      (SELECT LOWER (
+                                                                 BFG_DISTRIBUTOR_NAME)
+                                                         FROM GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS
+                                                        WHERE BFG_DISTRIBUTOR_ID =
+                                                                 BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID)
+                                               AND account_type_id = 10
+                                               AND active = 0))
+                  LOOP
+                     --Get the application Id of VPN network reports from applications table
+                     DBMS_OUTPUT.put_line ('inside sso');
+                     DBMS_OUTPUT.put_line (
+                        'COMP.account_id > ' || COMP.account_id);
+
+                     SELECT COUNT (*)
+                       INTO vpn_map_count
+                       FROM GBC_CORE.ACCOUNT_APPLICATIONS
+                      WHERE     APPLICATION_ID = 227
+                            AND ACCOUNT_ID = COMP.account_id;
+
+                     DBMS_OUTPUT.put_line (
+                        'vpn_map_count > ' || vpn_map_count);
+
+                     IF (vpn_map_count = 0)
+                     THEN
+                        SELECT SEQ_ACCOUNT_ID.NEXTVAL
+                          INTO sso_application_id
+                          FROM DUAL;
+
+                        DBMS_OUTPUT.put_line (
+                           'sso_application_id > ' || sso_application_id);
+                        DBMS_OUTPUT.put_line (
+                           'Assigning VPN Network Reports SSO to Indirect companies');
+
+                        --Assigning VPN Network Reports SSO to Indirect companies
+                        INSERT INTO GBC_CORE.ACCOUNT_APPLICATIONS
+                             VALUES (COMP.account_id,
+                                     227,
+                                     'dummy',
+                                     'dummy',
+                                     sso_application_id,
+                                     'Y',
+                                     NULL);
+                     -- 'ZHVtbXk='--227
+                     END IF;
+                                          --Assigning BT Internet Access Connect SSO to Indirect companies
+                     BEGIN
+                        SELECT COUNT (*)
+                          INTO ICA_MAP_COUNT
+                          FROM GBC_CORE.ACCOUNT_APPLICATIONS
+                         WHERE     APPLICATION_ID = 10492
+                               AND ACCOUNT_ID = COMP.account_id;
+
+                        DBMS_OUTPUT.put_line (
+                           'ICA_MAP_COUNT > ' || ICA_MAP_COUNT);
+
+                        IF (ICA_MAP_COUNT = 0)
+                        THEN
+                           SELECT SEQ_ACCOUNT_ID.NEXTVAL
+                             INTO sso_application_id
+                             FROM DUAL;
+
+                           DBMS_OUTPUT.put_line (
+                              'sso_application_id > ' || sso_application_id);
+                           DBMS_OUTPUT.put_line (
+                              'Assigning BT Internet Access Connect SSO to Indirect companies');
+
+                           --Assigning BT Internet Access Connect SSO to Indirect companies
+                           INSERT INTO GBC_CORE.ACCOUNT_APPLICATIONS
+                                VALUES (COMP.account_id,
+                                        10492,
+                                        'dummy',
+                                        'dummy',
+                                        sso_application_id,
+                                        'Y',
+                                        NULL);
+                        END IF;
+                     END;
+
+                     COMMIT;
+                  END LOOP;
+
+
+                  SELECT COUNT (*)
+                    INTO sso_user_count
+                    FROM GBC_CORE.ACCOUNTS
+                   WHERE     account_type_id = 20
+                         AND parent_id IN
+                                (SELECT account_id
+                                   FROM GBC_CORE.accounts
+                                  WHERE     LOWER (name) IN
+                                               (SELECT LOWER (
+                                                          BFG_DISTRIBUTOR_NAME)
+                                                  FROM GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS
+                                                 WHERE BFG_DISTRIBUTOR_ID =
+                                                          BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID)
+                                        AND account_type_id = 10
+                                        AND active = 0);
+
+                  DBMS_OUTPUT.put_line (
+                     'before user company: sso_user_count ' || sso_user_count);
+
+                  --Mapping all active users under Partner Company to other companies under same distributor
+                  FOR USERCOMPANY
+                     IN (SELECT account_id AS sso_user_account
+                           FROM GBC_CORE.ACCOUNTS
+                          WHERE     account_type_id = 20
+                                AND parent_id IN
+                                       (SELECT account_id
+                                          FROM GBC_CORE.accounts
+                                         WHERE     LOWER (name) IN
+                                                      (SELECT LOWER (
+                                                                 BFG_DISTRIBUTOR_NAME)
+                                                         FROM GBC_CORE.TEMP_BFG_DIST_CUST_DETAILS
+                                                        WHERE BFG_DISTRIBUTOR_ID =
+                                                                 BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID)
+                                               AND account_type_id = 10
+                                               AND active = 0))
+                  LOOP
+                     DBMS_OUTPUT.put_line (
+                           'USERCOMPANY.sso_user_account '
+                        || USERCOMPANY.sso_user_account);
+
+                     FOR USER_CUST
+                        IN (SELECT user_id
+                              FROM (SELECT u.user_id
+                                      FROM users u,
+                                           user_authentications uauth
+                                     WHERE     u.user_id = uauth.user_id
+                                           AND u.account_id =
+                                                  partner_company_id
+                                           AND uauth.status_code = 0
+                                    UNION
+                                    SELECT ua.user_id
+                                      FROM user_accounts ua,
+                                           user_authentications uauth
+                                     WHERE     ua.user_id = uauth.user_id
+                                           AND ua.account_id =
+                                                  partner_company_id
+                                           AND uauth.status_code = 0))
+                     LOOP
+                        DBMS_OUTPUT.put_line (
+                           'USERCOMPANY active users > ' || USER_CUST.user_id);
+
+                        SELECT COUNT (*)
+                          INTO user_comp_count
+                          FROM GBC_CORE.USER_ACCOUNTS
+                         WHERE     USER_ID = USER_CUST.user_id
+                               AND ACCOUNT_ID = USERCOMPANY.sso_user_account;
+
+                        DBMS_OUTPUT.put_line (
+                           'user_comp_count ' || user_comp_count);
+
+                        IF (user_comp_count = 0)
+                        THEN
+                           --Mapping all active users under Partner Company
+                           DBMS_OUTPUT.put_line (
+                              'USERCOMPANY active users under Partner Company');
+
+                           INSERT INTO GBC_CORE.USER_ACCOUNTS
+                                VALUES (USER_CUST.user_id,
+                                        USERCOMPANY.sso_user_account,
+                                        NULL,
+                                        NULL,
+                                        1,
+                                        'N',
+                                        40);
+                        END IF;
+
+                        SELECT COUNT (*)
+                          INTO user_app_count
+                          FROM GBC_CORE.USER_APPLICATIONS
+                         WHERE     USER_ID = USER_CUST.user_id
+                               AND ACCOUNT_ID = USERCOMPANY.sso_user_account
+                               AND application_id = 227;
+
+                        DBMS_OUTPUT.put_line (
+                           'user_app_count ' || user_app_count);
+
+                        IF (user_app_count = 0)
+                        THEN
+                           SELECT SEQ_ACCOUNT_ID.NEXTVAL
+                             INTO sso_user_map
+                             FROM DUAL;
+
+                           --Mapping User to VPN SSO
+                           DBMS_OUTPUT.put_line (
+                              'Mapping User to VPN SSO ' || sso_user_map);
+
+                           SELECT COUNT (*)
+                             INTO count_user
+                             FROM USER_APPLICATIONS
+                            WHERE user_application_id = sso_user_map;
+
+                           DBMS_OUTPUT.put_line (
+                              'OUTSIDE USER MAPPING > ' || count_user);
+
+                           IF (count_user = 0)
+                           THEN
+                              DBMS_OUTPUT.put_line (
+                                 'INSERT INTO GBC_CORE.USER_APPLICATIONS');
+
+                              INSERT INTO GBC_CORE.USER_APPLICATIONS
+                                   VALUES (sso_user_map,
+                                           USER_CUST.user_id,
+                                           227,
+                                           'dummy',
+                                           'dummy',
+                                           0,
+                                           4,
+                                           'USER',
+                                           USERCOMPANY.sso_user_account);
+                           END IF;
+                        END IF;
+                        
+                        ica_user_app_count:=-1;
+                        SELECT COUNT (*)
+                        INTO ica_user_app_count
+                        FROM GBC_CORE.USER_APPLICATIONS
+                        WHERE     USER_ID = USER_CUST.user_id
+                               AND ACCOUNT_ID = USERCOMPANY.sso_user_account
+                               AND application_id = 10492;
+
+                        DBMS_OUTPUT.put_line (
+                           'ica_user_app_count ' || ica_user_app_count);
+
+                        IF (ica_user_app_count = 0)
+                        THEN
+                           SELECT SEQ_ACCOUNT_ID.NEXTVAL
+                             INTO sso_user_map
+                             FROM DUAL;
+
+                           --Mapping User to BT Internet Access SSO
+                           DBMS_OUTPUT.put_line (
+                                 'Mapping User to BT Internet Access SSO '
+                              || sso_user_map);
+
+                           SELECT COUNT (*)
+                             INTO count_user
+                             FROM USER_APPLICATIONS
+                            WHERE user_application_id = sso_user_map;
+
+                           DBMS_OUTPUT.put_line (
+                              'OUTSIDE USER MAPPING > ' || count_user);
+
+                           IF (count_user = 0)
+                           THEN
+                              DBMS_OUTPUT.put_line (
+                                 'INSERT INTO GBC_CORE.USER_APPLICATIONS');
+
+                              INSERT INTO GBC_CORE.USER_APPLICATIONS
+                                   VALUES (sso_user_map,
+                                           USER_CUST.user_id,
+                                           10492,
+                                           'dummy',
+                                           'dummy',
+                                           0,
+                                           4,
+                                           'USER',
+                                           USERCOMPANY.sso_user_account);
+                           END IF;
+                        END IF;
+
+                     END LOOP;
+
+                     DBMS_OUTPUT.put_line ('sql count ' || SQL%ROWCOUNT);
+                     COMMIT;
+                  END LOOP;
+               ----------------------------------
+               ELSE                            --if partner company not exists
+                  DBMS_OUTPUT.put_line (
+                        'Partner company not found under DISTRIBUTOR > '
+                     || BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID);
+               --UTL_FILE.put_line (output_file_bad_data,'System is not able to associate customer id ');
+               END IF;
+            ELSE
+               DBMS_OUTPUT.put_line (
+                     'Indirect channel distributor not found in GS Portal> '
+                  || BFG_DISTRIBUTOR.BFG_DISTRIBUTOR_ID);
+            END IF;
+         END LOOP;
+      --EXCEPTION
+      --WHEN OTHERS THEN
+      ELSE
+         p_retcode := 1;
+         DBMS_OUTPUT.put_line (
+            'System is not able to associate customer id ');
+         DBMS_OUTPUT.put_line ('Error Code : ' || SQLCODE);
+      --DBMS_OUTPUT.put_line ('Error Message : ' || SQLERRM);
+      END IF;
+
+      ROLLBACK;
+   END SP_BFG_DIST_CUST_MAP;
+END BFG_DIST_CUST_SYNC_PKG_DEV
+;
